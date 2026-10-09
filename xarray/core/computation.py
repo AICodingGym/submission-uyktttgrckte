@@ -1727,7 +1727,7 @@ def dot(*arrays, dims=None, **kwargs):
     return result.transpose(*all_dims, missing_dims="ignore")
 
 
-def where(cond, x, y):
+def where(cond, x, y, keep_attrs=None):
     """Return elements from `x` or `y` depending on `cond`.
 
     Performs xarray-like broadcasting across input arguments.
@@ -1743,6 +1743,11 @@ def where(cond, x, y):
         values to choose from where `cond` is True
     y : scalar, array, Variable, DataArray or Dataset
         values to choose from where `cond` is False
+    keep_attrs : bool, optional
+        If True, the attributes of `x` are kept, or those of `y` if `x` is
+        not an xarray object. Coordinates and data variables keep their own
+        attributes. If None (default), the global ``keep_attrs`` option is
+        used, which defaults to False and drops attributes.
 
     Returns
     -------
@@ -1808,8 +1813,19 @@ def where(cond, x, y):
     Dataset.where, DataArray.where :
         equivalent methods
     """
+    from .dataarray import DataArray
+    from .dataset import Dataset
+
+    if keep_attrs is None:
+        keep_attrs = _get_keep_attrs(default=False)
+
+    if keep_attrs is True:
+        # keep the attributes of x, or of y if x is not an xarray object
+        src = x if hasattr(x, "attrs") else y
+        keep_attrs = lambda attrs, context: dict(getattr(src, "attrs", {}))
+
     # alignment for three arguments is complicated, so don't support it yet
-    return apply_ufunc(
+    result = apply_ufunc(
         duck_array_ops.where,
         cond,
         x,
@@ -1817,7 +1833,25 @@ def where(cond, x, y):
         join="exact",
         dataset_join="exact",
         dask="allowed",
+        keep_attrs=keep_attrs,
     )
+
+    if callable(keep_attrs) and isinstance(result, (DataArray, Dataset)):
+        # the callable is also applied to coords and data variables, so give
+        # each its own attrs from the first input (x, y, cond) that has it
+        inputs = [o for o in (x, y, cond) if isinstance(o, (DataArray, Dataset))]
+        for name in [*result.coords, *getattr(result, "data_vars", [])]:
+            owner = next(
+                (
+                    o
+                    for o in inputs
+                    if name in o.coords or name in getattr(o, "data_vars", {})
+                ),
+                None,
+            )
+            result[name].attrs = dict(owner[name].attrs) if owner is not None else {}
+
+    return result
 
 
 def polyval(coord, coeffs, degree_dim="degree"):
